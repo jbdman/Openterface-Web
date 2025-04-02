@@ -1,0 +1,249 @@
+<button id="connect">Connect Serial (CH9329)</button>
+<video width="1280" height="720" autoplay playsinline></video>
+
+<script>
+// ===============================
+// 1) Video + Serial Setup
+// ===============================
+let video = document.querySelector('video');
+let constraints = { video: {width: 1920}, audio: false };
+
+const filters = [
+  { usbVendorId: 0x1A86, usbProductId: 0x7523 }  // CH9329's usual IDs
+];
+
+let port;
+let writer;
+
+// Ask for camera, then ask for serial.
+document.getElementById("connect").addEventListener("click", async () => {
+  await navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream => { video.srcObject = stream; });
+  
+  // Request the CH9329 serial port
+  port = await navigator.serial.requestPort({ filters });
+  await port.open({ baudRate: 9600 });
+  writer = port.writable.getWriter();
+
+  console.log("Serial port opened. Listening for keyboard events...");
+});
+
+// ===============================
+// 2) Global Pressed Keys Tracking
+// ===============================
+//
+// We maintain two sets:
+//   - pressedModifiers: which modifiers are currently held
+//   - pressedUsageCodes: which HID usage codes (non-modifier) are currently held
+//
+// On keydown, we add to one of these sets and send an updated packet.
+// On keyup, we remove from the sets and send an updated packet.
+//
+const pressedModifiers = {
+  leftCtrl: false,
+  rightCtrl: false,
+  leftShift: false,
+  rightShift: false,
+  leftAlt: false,
+  rightAlt: false,
+  leftMeta: false,   // Windows/Command key
+  rightMeta: false
+};
+
+let pressedUsageCodes = new Set(); // HID usage codes of non-modifier keys
+
+// ===============================
+// 3) Mapping from e.code -> HID
+// ===============================
+//
+// We'll keep SHIFT, CTRL, ALT, META out of the normal map below (since they are special).
+// If you want a more complete approach for punctuation, uppercase, etc.,
+// you can expand or adjust the logic as needed.
+const codeToUsage = {
+  // Letters: e.code is "KeyA", "KeyB" ...
+  KeyA: 0x04, KeyB: 0x05, KeyC: 0x06, KeyD: 0x07,
+  KeyE: 0x08, KeyF: 0x09, KeyG: 0x0A, KeyH: 0x0B,
+  KeyI: 0x0C, KeyJ: 0x0D, KeyK: 0x0E, KeyL: 0x0F,
+  KeyM: 0x10, KeyN: 0x11, KeyO: 0x12, KeyP: 0x13,
+  KeyQ: 0x14, KeyR: 0x15, KeyS: 0x16, KeyT: 0x17,
+  KeyU: 0x18, KeyV: 0x19, KeyW: 0x1A, KeyX: 0x1B,
+  KeyY: 0x1C, KeyZ: 0x1D,
+
+  // Digits: e.code is "Digit1" ... "Digit0"
+  Digit1: 0x1E, Digit2: 0x1F, Digit3: 0x20, Digit4: 0x21,
+  Digit5: 0x22, Digit6: 0x23, Digit7: 0x24, Digit8: 0x25,
+  Digit9: 0x26, Digit0: 0x27,
+
+  // Numpad
+  Numpad1: 0x1E, Numpad2: 0x1F, Numpad3: 0x20, Numpad4: 0x21,
+  Numpad5: 0x22, Numpad6: 0x23, Numpad7: 0x24, Numpad8: 0x25,
+  Numpad9: 0x26, Numpad0: 0x27,
+
+  Enter: 0x28,       // e.code = "Enter"
+  Escape: 0x29,      // "Escape"
+  Backspace: 0x2A,   // "Backspace"
+  Tab: 0x2B,         // "Tab"
+  Space: 0x2C,       // "Space"
+  Minus: 0x2D,       // "Minus" => '-'
+  Equal: 0x2E,       // "Equal" => '='
+  BracketLeft: 0x2F, // '['
+  BracketRight: 0x30,// ']'
+  Backslash: 0x31,   // '\\'
+  Semicolon: 0x33,   // ';'
+  Quote: 0x34,       // "'"
+  Backquote: 0x35,   // '`' ~ on US layout
+  Comma: 0x36,       // ','
+  Period: 0x37,      // '.'
+  Slash: 0x38,       // '/'
+
+  // Function keys
+  F1: 0x3A, F2: 0x3B, F3: 0x3C, F4: 0x3D,
+  F5: 0x3E, F6: 0x3F, F7: 0x40, F8: 0x41,
+  F9: 0x42, F10: 0x43, F11: 0x44, F12: 0x45,
+
+  // Arrow keys
+  ArrowUp: 0x52,
+  ArrowDown: 0x51,
+  ArrowLeft: 0x50,
+  ArrowRight: 0x4F,
+
+  // Insert, Delete, Home, End, PageUp, PageDown
+  Insert: 0x49,
+  Delete: 0x4C,
+  Home: 0x4A,
+  End: 0x4D,
+  PageUp: 0x4B,
+  PageDown: 0x4E,
+
+  // etc. Expand as you wish.
+};
+
+// ===============================
+// 4) Keyboard Event Listeners
+// ===============================
+
+document.addEventListener("keydown", async (e) => {
+  if (!writer) return; // serial not open yet
+
+  // Prevent default so browser doesn't do e.g. Ctrl+T, F5 refresh, etc.
+  // If you need them, remove or conditionally block them.
+  e.preventDefault();
+
+  // Check if it's a modifier key:
+  if (e.code === "ShiftLeft")   { pressedModifiers.leftShift = true; }
+  else if (e.code === "ShiftRight")  { pressedModifiers.rightShift = true; }
+  else if (e.code === "ControlLeft") { pressedModifiers.leftCtrl = true; }
+  else if (e.code === "ControlRight"){ pressedModifiers.rightCtrl = true; }
+  else if (e.code === "AltLeft")     { pressedModifiers.leftAlt = true; }
+  else if (e.code === "AltRight")    { pressedModifiers.rightAlt = true; }
+  else if (e.code === "MetaLeft")    { pressedModifiers.leftMeta = true; }
+  else if (e.code === "MetaRight")   { pressedModifiers.rightMeta = true; }
+  else {
+    // Otherwise, see if we have a usage code for it
+    const usage = codeToUsage[e.code];
+    if (usage) {
+      pressedUsageCodes.add(usage);
+    } else {
+      // e.g. unknown key or we haven't mapped it
+      console.log("Unknown key:", e.code);
+    }
+  }
+
+  await sendKeyboardReport();
+});
+
+document.addEventListener("keyup", async (e) => {
+  if (!writer) return;
+
+  e.preventDefault();
+
+  // If it's a modifier, un-set it:
+  if (e.code === "ShiftLeft")   { pressedModifiers.leftShift = false; }
+  else if (e.code === "ShiftRight")  { pressedModifiers.rightShift = false; }
+  else if (e.code === "ControlLeft") { pressedModifiers.leftCtrl = false; }
+  else if (e.code === "ControlRight"){ pressedModifiers.rightCtrl = false; }
+  else if (e.code === "AltLeft")     { pressedModifiers.leftAlt = false; }
+  else if (e.code === "AltRight")    { pressedModifiers.rightAlt = false; }
+  else if (e.code === "MetaLeft")    { pressedModifiers.leftMeta = false; }
+  else if (e.code === "MetaRight")   { pressedModifiers.rightMeta = false; }
+  else {
+    // If it's a normal key, remove from set
+    const usage = codeToUsage[e.code];
+    if (usage) {
+      pressedUsageCodes.delete(usage);
+    }
+  }
+
+  await sendKeyboardReport();
+});
+
+// ===============================
+// 5) Sending the Keyboard Packet
+// ===============================
+
+/**
+ * Rebuilds the keyboard report from pressedModifiers + pressedUsageCodes,
+ * then writes it via serial.
+ */
+async function sendKeyboardReport() {
+  // Build the control bits.
+  // bit0 = left Ctrl, bit1 = left Shift, bit2 = left Alt, bit3 = left Win
+  // bit4 = right Ctrl, bit5 = right Shift, bit6 = right Alt, bit7 = right Win
+  let controlByte = 0;
+  if (pressedModifiers.leftCtrl)   controlByte |= 1 << 0; // bit0
+  if (pressedModifiers.leftShift)  controlByte |= 1 << 1; // bit1
+  if (pressedModifiers.leftAlt)    controlByte |= 1 << 2; // bit2
+  if (pressedModifiers.leftMeta)   controlByte |= 1 << 3; // bit3
+  if (pressedModifiers.rightCtrl)  controlByte |= 1 << 4; // bit4
+  if (pressedModifiers.rightShift) controlByte |= 1 << 5; // bit5
+  if (pressedModifiers.rightAlt)   controlByte |= 1 << 6; // bit6
+  if (pressedModifiers.rightMeta)  controlByte |= 1 << 7; // bit7
+
+  // Up to 6 normal keys in the packet
+  const usageArray = Array.from(pressedUsageCodes);
+  // If more than 6 keys are pressed at once, the extras are dropped (standard HID limitation).
+  const firstSix = usageArray.slice(0, 6);
+
+  // The CMD_SEND_KB_GENERAL_DATA (0x02) payload is 8 bytes:
+  // [ controlBits, 0x00, key1, key2, key3, key4, key5, key6 ]
+  const payload = [
+    controlByte,
+    0x00,
+    ...firstSix,
+  ];
+  // Pad to ensure total of 8 payload bytes
+  while (payload.length < 8) {
+    payload.push(0x00);
+  }
+
+  // Build the full CH9329 packet
+  const packet = buildPacket(0x02, payload);
+  await writer.write(packet);
+}
+
+/**
+ * Builds a standard CH9329 packet: 
+ *   Header (0x57, 0xAB), address 0x00, command, length, payload, sum
+ */
+function buildPacket(command, payload) {
+  const HEAD1 = 0x57;
+  const HEAD2 = 0xAB;
+  const ADDR  = 0x00;
+  const LEN   = payload.length;
+
+  const arrWithoutSum = [
+    HEAD1, HEAD2,
+    ADDR,
+    command,
+    LEN,
+    ...payload
+  ];
+
+  // Calculate sum of all bytes
+  let sum = 0;
+  for (let b of arrWithoutSum) {
+    sum = (sum + b) & 0xFF;
+  }
+  return new Uint8Array([...arrWithoutSum, sum]);
+}
+</script>

@@ -1,0 +1,143 @@
+<button id="connect">Connect Serial (CH9329)</button>
+<video id="video" width="1280" height="720" autoplay playsinline></video>
+
+<script>
+// ===============================
+// 1) Video + Serial Setup
+// ===============================
+let video = document.querySelector('#video');
+let constraints = { video: { width: 1920 }, audio: false };
+
+const filters = [
+  { usbVendorId: 0x1A86, usbProductId: 0x7523 }  // CH9329's usual IDs
+];
+
+let port;
+let writer;
+let mouseX = 0, mouseY = 0;           // Current mouse coords over the video
+let isPointerMoving = false;          // Whether we've had a mouse move event
+let animationFrameId = null;          // For requestAnimationFrame-based throttle
+
+// Adjust this if you want a smaller or larger coordinate space:
+let scaleFactor = 1.0;  // can be < 1.0 or > 1.0 to compress/expand movement
+
+document.getElementById("connect").addEventListener("click", async () => {
+  // Grab camera
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+  
+  // Request the CH9329 serial port
+  port = await navigator.serial.requestPort({ filters });
+  await port.open({ baudRate: 9600 });
+  writer = port.writable.getWriter();
+
+  console.log("Serial port opened. Now tracking mouse for absolute reports...");
+});
+
+// ===============================
+// 2) Mouse Movement => Absolute Coordinates
+// ===============================
+
+// We'll track mouse position over the video. On each movement, record new x,y.
+// Then we trigger a requestAnimationFrame to send an update if needed.
+video.addEventListener('mousemove', (e) => {
+  if (!writer) return; // serial not open?
+  // console.log(e)
+
+  const rect = video.getBoundingClientRect();
+  // Mouse X/Y relative to video’s top-left corner
+  let x = e.clientX - rect.left;
+  let y = e.clientY - rect.top;
+
+  // Store in global variables
+  mouseX = x;
+  mouseY = y;
+  isPointerMoving = true;
+
+  // Kick off an animation frame to send the position if we haven't already
+  if (!animationFrameId) {
+    animationFrameId = requestAnimationFrame(sendAbsMousePosition);
+  }
+});
+
+// ===============================
+// 3) Send an Absolute Mouse Packet
+// ===============================
+
+// A helper that scales a coordinate in [0..elementSize] to [0..4095]
+// then multiplies by scaleFactor and clamps to [0..4095].
+function scaleCoord(coord, elementSize) {
+  let val = (coord / elementSize) * 4095 * scaleFactor;
+  if (val < 0) val = 0;
+  if (val > 4095) val = 4095;
+  return Math.round(val);
+}
+
+async function sendAbsMousePosition() {
+  animationFrameId = null; // clear the pending frame
+
+  if (!isPointerMoving || !writer) {
+    // no movement or no port, no need to send
+    return;
+  }
+  isPointerMoving = false;
+
+  // Convert our mouse coords to [0..4095]
+  let xAbs = scaleCoord(mouseX, video.clientWidth);
+  let yAbs = scaleCoord(mouseY, video.clientHeight);
+
+  // Build and send the packet
+  // Example: no buttons pressed (0), no wheel movement (0)
+  let packet = buildAbsMousePacket(0 /*buttons*/, xAbs, yAbs, 0 /*wheel*/);
+  try {
+    await writer.write(packet);
+  } catch (err) {
+    console.error("Error writing absolute mouse packet:", err);
+  }
+}
+
+/**
+ * Build an absolute mouse packet for CH9329:
+ *   Command = 0x04
+ *   Payload = [0x02, buttonMask, xLow, xHigh, yLow, yHigh, wheel]
+ *
+ * - 0x02 is the "report ID" for absolute mouse.
+ * - buttonMask = bit0=left, bit1=right, bit2=middle, etc.
+ * - xLow = low byte of X, xHigh = high byte of X
+ * - yLow = low byte of Y, yHigh = high byte of Y
+ * - wheel = scroll (0 if none)
+ */
+function buildAbsMousePacket(buttonMask, x, y, wheel) {
+  const xLow  = x & 0xFF;
+  const xHigh = (x >> 8) & 0xFF;
+  const yLow  = y & 0xFF;
+  const yHigh = (y >> 8) & 0xFF;
+
+  const payload = [
+    0x02,         // report ID for absolute mouse
+    buttonMask & 0xFF,
+    xLow, xHigh,
+    yLow, yHigh,
+    wheel & 0xFF
+  ];
+  return buildPacket(0x04, payload);
+}
+
+// ===============================
+// 4) Generic Packet Builder
+// ===============================
+function buildPacket(command, payload) {
+  const HEAD1 = 0x57;
+  const HEAD2 = 0xAB;
+  const ADDR  = 0x00; // default address
+  const LEN   = payload.length;
+
+  const arrNoSum = [HEAD1, HEAD2, ADDR, command, LEN, ...payload];
+
+  let sum = 0;
+  for (let b of arrNoSum) {
+    sum = (sum + b) & 0xFF;
+  }
+  return new Uint8Array([...arrNoSum, sum]);
+}
+</script>

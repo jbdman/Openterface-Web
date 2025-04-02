@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Openterface-Web</title>
+</head>
+<body>
+
+<button id="connect" style="display: block;">Connect</button> <br>
+<video id="video" width="1280" height="720" autoplay playsinline></video>
+
+<script>
+// ===============================
+// 1) Video + Serial Setup
+// ===============================
+let video = document.querySelector('#video');
+let constraints = { video: { width: 1920 }, audio: false };
+
+const filters = [
+  { usbVendorId: 0x1A86, usbProductId: 0x7523 }  // Typical CH9329 IDs
+];
+
+let port;
+let writer;
+
+// Set this higher or lower to expand/compress how your pointer is mapped to [0..4095].
+let scaleFactor = 1.0;
+
+document.getElementById("connect").addEventListener("click", async () => {
+  // 1) Start camera
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+
+  // 2) Request the CH9329 serial port
+  port = await navigator.serial.requestPort({ filters });
+  await port.open({ baudRate: 115200 });
+  writer = port.writable.getWriter();
+
+  console.log("Serial port opened. Keyboard + absolute mouse + clicks enabled.");
+});
+
+// ===============================
+// 2) KEYBOARD LOGIC (same as before)
+// ===============================
+
+const pressedModifiers = {
+  leftCtrl: false,
+  rightCtrl: false,
+  leftShift: false,
+  rightShift: false,
+  leftAlt: false,
+  rightAlt: false,
+  leftMeta: false,
+  rightMeta: false
+};
+
+let pressedUsageCodes = new Set(); 
+
+// Basic e.code => HID usage table
+const codeToUsage = {
+  // Letters
+  KeyA: 0x04, KeyB: 0x05, KeyC: 0x06, KeyD: 0x07,
+  KeyE: 0x08, KeyF: 0x09, KeyG: 0x0A, KeyH: 0x0B,
+  KeyI: 0x0C, KeyJ: 0x0D, KeyK: 0x0E, KeyL: 0x0F,
+  KeyM: 0x10, KeyN: 0x11, KeyO: 0x12, KeyP: 0x13,
+  KeyQ: 0x14, KeyR: 0x15, KeyS: 0x16, KeyT: 0x17,
+  KeyU: 0x18, KeyV: 0x19, KeyW: 0x1A, KeyX: 0x1B,
+  KeyY: 0x1C, KeyZ: 0x1D,
+
+  // Digits
+  Digit1: 0x1E, Digit2: 0x1F, Digit3: 0x20, Digit4: 0x21,
+  Digit5: 0x22, Digit6: 0x23, Digit7: 0x24, Digit8: 0x25,
+  Digit9: 0x26, Digit0: 0x27,
+
+  Enter: 0x28,
+  Escape: 0x29,
+  Backspace: 0x2A,
+  Tab: 0x2B,
+  Space: 0x2C,
+  Minus: 0x2D,
+  Equal: 0x2E,
+  BracketLeft: 0x2F,
+  BracketRight: 0x30,
+  Backslash: 0x31,
+  Semicolon: 0x33,
+  Quote: 0x34,
+  Backquote: 0x35,
+  Comma: 0x36,
+  Period: 0x37,
+  Slash: 0x38,
+
+  // Function keys
+  F1: 0x3A, F2: 0x3B, F3: 0x3C, F4: 0x3D,
+  F5: 0x3E, F6: 0x3F, F7: 0x40, F8: 0x41,
+  F9: 0x42, F10: 0x43, F11: 0x44, F12: 0x45,
+
+  // Arrows
+  ArrowUp: 0x52,
+  ArrowDown: 0x51,
+  ArrowLeft: 0x50,
+  ArrowRight: 0x4F,
+
+  // Insert, Delete, Home, End, PageUp, PageDown
+  Insert: 0x49,
+  Delete: 0x4C,
+  Home: 0x4A,
+  End: 0x4D,
+  PageUp: 0x4B,
+  PageDown: 0x4E,
+};
+
+document.addEventListener("keydown", async (e) => {
+  if (!writer) return;
+  e.preventDefault();
+
+  switch(e.code) {
+    case "ShiftLeft":   pressedModifiers.leftShift = true; break;
+    case "ShiftRight":  pressedModifiers.rightShift = true; break;
+    case "ControlLeft": pressedModifiers.leftCtrl = true;   break;
+    case "ControlRight":pressedModifiers.rightCtrl = true;  break;
+    case "AltLeft":     pressedModifiers.leftAlt = true;    break;
+    case "AltRight":    pressedModifiers.rightAlt = true;   break;
+    case "MetaLeft":    pressedModifiers.leftMeta = true;   break;
+    case "MetaRight":   pressedModifiers.rightMeta = true;  break;
+    default:
+      const usage = codeToUsage[e.code];
+      if (usage) pressedUsageCodes.add(usage);
+      else console.log("Unknown key:", e.code);
+      break;
+  }
+  await sendKeyboardReport();
+});
+
+document.addEventListener("keyup", async (e) => {
+  if (!writer) return;
+  e.preventDefault();
+
+  switch(e.code) {
+    case "ShiftLeft":   pressedModifiers.leftShift = false; break;
+    case "ShiftRight":  pressedModifiers.rightShift = false; break;
+    case "ControlLeft": pressedModifiers.leftCtrl = false;   break;
+    case "ControlRight":pressedModifiers.rightCtrl = false;  break;
+    case "AltLeft":     pressedModifiers.leftAlt = false;    break;
+    case "AltRight":    pressedModifiers.rightAlt = false;   break;
+    case "MetaLeft":    pressedModifiers.leftMeta = false;   break;
+    case "MetaRight":   pressedModifiers.rightMeta = false;  break;
+    default:
+      const usage = codeToUsage[e.code];
+      if (usage) pressedUsageCodes.delete(usage);
+      break;
+  }
+  await sendKeyboardReport();
+});
+
+async function sendKeyboardReport() {
+  let ctrlByte = 0;
+  if (pressedModifiers.leftCtrl)   ctrlByte |= 1 << 0;
+  if (pressedModifiers.leftShift)  ctrlByte |= 1 << 1;
+  if (pressedModifiers.leftAlt)    ctrlByte |= 1 << 2;
+  if (pressedModifiers.leftMeta)   ctrlByte |= 1 << 3;
+  if (pressedModifiers.rightCtrl)  ctrlByte |= 1 << 4;
+  if (pressedModifiers.rightShift) ctrlByte |= 1 << 5;
+  if (pressedModifiers.rightAlt)   ctrlByte |= 1 << 6;
+  if (pressedModifiers.rightMeta)  ctrlByte |= 1 << 7;
+
+  const keys = Array.from(pressedUsageCodes).slice(0,6);
+  const payload = [ctrlByte, 0x00, ...keys];
+  while (payload.length < 8) payload.push(0x00);
+
+  const pkt = buildPacket(0x02, payload);
+  await writer.write(pkt);
+}
+
+// ===============================
+// 3) ABSOLUTE MOUSE LOGIC w/ CLICKS
+// ===============================
+
+// We'll track the pointer's position and which buttons are held:
+let mouseX = 0, mouseY = 0;
+let mouseButtonsMask = 0; // bit0=left, bit1=right, bit2=middle
+let isPointerMoving = false;
+let frameId = null;
+
+// For absolute mouse: pointerdown sets bits in buttonMask, pointerup clears them.
+video.addEventListener('pointerdown', (e) => {
+  if (!writer) return;
+  switch(e.button) {
+    case 0: mouseButtonsMask |= 0x01; break; // left => bit0
+    case 1: mouseButtonsMask |= 0x04; break; // middle => bit2
+    case 2: mouseButtonsMask |= 0x02; break; // right => bit1
+  }
+  // Request an animation frame to send an update
+  if (!frameId) frameId = requestAnimationFrame(sendAbsMousePosition);
+});
+
+video.addEventListener('pointerup', (e) => {
+  if (!writer) return;
+  switch(e.button) {
+    case 0: mouseButtonsMask &= ~0x01; break; // clear bit0
+    case 1: mouseButtonsMask &= ~0x04; break; // clear bit2
+    case 2: mouseButtonsMask &= ~0x02; break; // clear bit1
+  }
+  if (!frameId) frameId = requestAnimationFrame(sendAbsMousePosition);
+});
+
+video.addEventListener('mousemove', (e) => {
+  if (!writer) return;
+  // get local coords in video
+  const rect = video.getBoundingClientRect();
+  mouseX = e.clientX - rect.left;
+  mouseY = e.clientY - rect.top;
+  isPointerMoving = true;
+
+  if (!frameId) frameId = requestAnimationFrame(sendAbsMousePosition);
+});
+
+async function sendAbsMousePosition() {
+  frameId = null;
+  if (!writer) return;
+  if (!isPointerMoving && mouseButtonsMask===0) return; // no move/no button => no update needed
+  isPointerMoving = false;
+
+  // Scale the coords to 0..4095
+  let xAbs = scaleCoord(mouseX, video.clientWidth);
+  let yAbs = scaleCoord(mouseY, video.clientHeight);
+
+  const pkt = buildAbsMousePacket(mouseButtonsMask, xAbs, yAbs, 0);
+  try {
+    await writer.write(pkt);
+  } catch (err) {
+    console.error("Writing mouse packet error:", err);
+  }
+}
+
+// Map 0..videoSize -> 0..4095, then multiply by scaleFactor, clamp, and round
+function scaleCoord(coord, size) {
+  let val = (coord / size) * 4095 * scaleFactor;
+  if (val < 0) val = 0;
+  if (val > 4095) val = 4095;
+  return Math.round(val);
+}
+
+/**
+ * CMD_SEND_MS_ABS_DATA (0x04) => [0x02, buttonMask, xLow, xHigh, yLow, yHigh, wheel]
+ */
+function buildAbsMousePacket(buttonMask, x, y, wheel) {
+  const xLow  = x & 0xFF;
+  const xHigh = (x >> 8) & 0xFF;
+  const yLow  = y & 0xFF;
+  const yHigh = (y >> 8) & 0xFF;
+
+  const payload = [
+    0x02, // "report ID" for absolute mouse
+    buttonMask & 0xFF, 
+    xLow, xHigh,
+    yLow, yHigh,
+    wheel & 0xFF
+  ];
+  return buildPacket(0x04, payload);
+}
+
+// ===============================
+// 4) Shared Packet Builder
+// ===============================
+function buildPacket(command, payload) {
+  const HEAD1 = 0x57;
+  const HEAD2 = 0xAB;
+  const ADDR  = 0x00;
+  const LEN   = payload.length;
+
+  const arrNoSum = [HEAD1, HEAD2, ADDR, command, LEN, ...payload];
+  let sum = 0;
+  for (let b of arrNoSum) {
+    sum = (sum + b) & 0xFF;
+  }
+  return new Uint8Array([...arrNoSum, sum]);
+}
+</script>
+
+</body>
+</html>
